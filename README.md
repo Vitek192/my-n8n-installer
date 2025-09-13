@@ -1,5 +1,5 @@
 #!/bin/bash
-# Скрипт для развертывания n8n на Ubuntu VPS
+# Скрипт для развертывания n8n на Ubuntu VPS с поддержкой traefik и n8n-mcp
 # Цвета для вывода
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -73,11 +73,9 @@ check_ubuntu_version() {
 # Проверка и установка Docker
 install_docker() {
     print_header "Проверка и установка Docker"
-    # Проверка наличия Docker
     if command -v docker &> /dev/null; then
         DOCKER_VERSION=$(docker --version | cut -d' ' -f3 | cut -d',' -f1)
         print_success "Docker уже установлен: $DOCKER_VERSION"
-        # Проверка Docker Compose
         if docker compose version &> /dev/null || docker-compose version &> /dev/null; then
             if docker compose version &> /dev/null; then
                 COMPOSE_VERSION=$(docker compose version | cut -d' ' -f4)
@@ -119,45 +117,46 @@ install_docker_engine() {
 # Установка Docker Compose
 install_docker_compose() {
     print_info "Установка Docker Compose v2..."
-    # Установка Docker Compose plugin (новый способ)
     apt install -y docker-compose-plugin
     print_success "Docker Compose успешно установлен"
 }
 
-# Проверка существующих контейнеров n8n и n8n-mcp
+# Проверка существующих контейнеров traefik, n8n и n8n-mcp
 check_existing_containers() {
-    print_header "Проверка существующих контейнеров n8n и n8n-mcp"
+    print_header "Проверка существующих контейнеров traefik, n8n и n8n-mcp"
     # Проверка запущенных контейнеров
-    if docker ps -a --format "table {{.Names}}\t{{.Image}}\t{{.Status}}" | grep -q "n8n\|n8n-mcp"; then
-        print_warning "Обнаружены существующие контейнеры n8n/n8n-mcp:"
-        docker ps -a --format "table {{.Names}}\t{{.Image}}\t{{.Status}}" | grep -E "n8n|n8n-mcp"
+    if docker ps -a --format "table {{.Names}}\t{{.Image}}\t{{.Status}}" | grep -q "traefik\|n8n\|n8n-mcp"; then
+        print_warning "Обнаружены существующие контейнеры:"
+        docker ps -a --format "table {{.Names}}\t{{.Image}}\t{{.Status}}" | grep -E "traefik|n8n|n8n-mcp"
         read -p "Хотите остановить и удалить существующие контейнеры? (y/n): " -n 1 -r
         echo
         if [[ $REPLY =~ ^[Yy]$ ]]; then
             print_info "Останавливаем существующие контейнеры..."
+            docker stop $(docker ps -aq --filter "name=traefik") 2>/dev/null || true
             docker stop $(docker ps -aq --filter "name=n8n") 2>/dev/null || true
             docker stop $(docker ps -aq --filter "name=n8n-mcp") 2>/dev/null || true
+            docker rm $(docker ps -aq --filter "name=traefik") 2>/dev/null || true
             docker rm $(docker ps -aq --filter "name=n8n") 2>/dev/null || true
             docker rm $(docker ps -aq --filter "name=n8n-mcp") 2>/dev/null || true
             print_success "Существующие контейнеры остановлены и удалены"
         fi
     else
-        print_success "Существующие контейнеры n8n/n8n-mcp не найдены"
+        print_success "Существующие контейнеры traefik/n8n/n8n-mcp не найдены"
     fi
 
     # Проверка Docker volumes
-    if docker volume ls | grep -q "n8n\|mcp"; then
-        print_warning "Обнаружены существующие volumes n8n/mcp:"
-        docker volume ls | grep -E "n8n|mcp"
+    if docker volume ls | grep -q "n8n_data\|traefik_data\|mcp_logs"; then
+        print_warning "Обнаружены существующие volumes:"
+        docker volume ls | grep -E "n8n_data|traefik_data|mcp_logs"
         read -p "Хотите сохранить существующие volumes? (y/n): " -n 1 -r
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
             print_info "Удаляем существующие volumes..."
-            docker volume rm $(docker volume ls -q | grep -E "n8n|mcp") 2>/dev/null || true
+            docker volume rm $(docker volume ls -q | grep -E "n8n_data|traefik_data|mcp_logs") 2>/dev/null || true
             print_success "Существующие volumes удалены"
         fi
     else
-        print_success "Существующие volumes n8n/mcp не найдены"
+        print_success "Существующие volumes n8n_data/traefik_data/mcp_logs не найдены"
     fi
 
     # Проверка существующих SSL сертификатов
@@ -178,31 +177,26 @@ check_existing_containers() {
 # Настройка домена и SSL
 setup_domain_ssl() {
     print_header "Настройка домена и SSL"
-    # Запрос домена
     read -p "Введите ваш домен (например: n8n.example.com): " DOMAIN
     if [ -z "$DOMAIN" ]; then
         print_error "Домен не может быть пустым"
         exit 1
     fi
-    # Проверка формата домена
     if [[ ! $DOMAIN =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
         print_error "Неверный формат домена: $DOMAIN"
         exit 1
     fi
-    # Запрос email для SSL
     read -p "Введите email для Let's Encrypt сертификата: " SSL_EMAIL
     if [ -z "$SSL_EMAIL" ]; then
         print_error "Email не может быть пустым"
         exit 1
     fi
-    # Проверка формата email
     if [[ ! $SSL_EMAIL =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
         print_error "Неверный формат email: $SSL_EMAIL"
         exit 1
     fi
     print_success "Домен: $DOMAIN"
     print_success "Email: $SSL_EMAIL"
-    # Извлечение субдомена и основного домена
     if [[ $DOMAIN =~ ^([^.]+)\.(.*)$ ]]; then
         SUBDOMAIN="${BASH_REMATCH[1]}"
         MAIN_DOMAIN="${BASH_REMATCH[2]}"
@@ -249,7 +243,6 @@ setup_secrets() {
 # Создание конфигурационных файлов
 create_config_files() {
     print_header "Создание конфигурационных файлов"
-    # Создание директории для проекта
     if [ -d "$PROJECT_DIR" ]; then
         print_warning "Директория $PROJECT_DIR уже существует"
         read -p "Хотите перезаписать файлы? (y/n): " -n 1 -r
@@ -261,7 +254,6 @@ create_config_files() {
     fi
     mkdir -p "$PROJECT_DIR"
     cd "$PROJECT_DIR"
-    # Создание .env файла
     print_info "Создание .env файла..."
     cat > .env << EOF
 # Конфигурация n8n
@@ -292,7 +284,6 @@ LOG_LEVEL=$LOG_LEVEL
 VERSION=$VERSION
 GITHUB_REPOSITORY=$GITHUB_REPOSITORY
 EOF
-    # Создание docker-compose.yml
     print_info "Создание docker-compose.yml..."
     cat > docker-compose.yml << 'EOF'
 version: '3.8'
@@ -319,6 +310,12 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - n8n-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik.rule=Host(traefik.${DOMAIN_NAME})"
+      - "traefik.http.routers.traefik.entrypoints=websecure"
+      - "traefik.http.routers.traefik.tls.certresolver=mytlschallenge"
+      - "traefik.http.routers.traefik.service=api@internal"
 
   n8n:
     image: n8nio/n8n:latest
@@ -371,20 +368,6 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
-    # Раскомментируйте для использования PostgreSQL
-    # postgres:
-    #   image: postgres:15
-    #   restart: always
-    #   environment:
-    #     - POSTGRES_DB=${DB_POSTGRESDB_DATABASE}
-    #     - POSTGRES_USER=${DB_POSTGRESDB_USER}
-    #     - POSTGRES_PASSWORD=${DB_POSTGRESDB_PASSWORD}
-    #   volumes:
-    #     - postgres_data:/var/lib/postgresql/data
-    #   labels:
-    #     - "traefik.enable=false"
-    #   networks:
-    #     - n8n-network
 
   n8n-mcp:
     image: ghcr.io/${GITHUB_REPOSITORY}/n8n-mcp:${VERSION}
@@ -423,19 +406,14 @@ volumes:
     driver: local
   mcp_logs:
     driver: local
-  # postgres_data:
 
 networks:
   n8n-network:
     driver: bridge
 EOF
-    # Создание директорий
-    mkdir -p local-files
-    mkdir -p data
-    # Проверяем, что файлы созданы корректно
+    mkdir -p local-files data
     if [ -f "docker-compose.yml" ] && [ -f ".env" ]; then
         print_success "Конфигурационные файлы созданы в директории $PROJECT_DIR"
-        # Проверка синтаксиса docker-compose.yml
         if docker compose config --quiet 2>/dev/null; then
             print_success "Синтаксис docker-compose.yml корректен"
         else
@@ -445,7 +423,6 @@ EOF
         print_error "Ошибка: не удалось создать конфигурационные файлы"
         exit 1
     fi
-    # Возвращаемся в исходную директорию
     cd "$ORIGINAL_DIR" || {
         print_warning "Не удалось вернуться в исходную директорию: $ORIGINAL_DIR"
     }
@@ -454,12 +431,10 @@ EOF
 # Проверка конфигурационных файлов
 check_config_files() {
     print_info "Проверка конфигурационных файлов..."
-    # Проверка docker-compose.yml
     if [ ! -f "docker-compose.yml" ]; then
         print_error "Файл docker-compose.yml не найден"
         return 1
     fi
-    # Проверка синтаксиса docker-compose.yml
     if ! docker compose config --quiet 2>/dev/null; then
         print_error "Ошибка в синтаксисе docker-compose.yml"
         print_info "Проверьте файл docker-compose.yml на ошибки"
@@ -467,7 +442,6 @@ check_config_files() {
     else
         print_success "docker-compose.yml корректен"
     fi
-    # Проверка .env файла
     if [ ! -f ".env" ]; then
         print_error "Файл .env не найден"
         return 1
@@ -478,14 +452,12 @@ check_config_files() {
 
 # Запуск сервисов
 start_services() {
-    print_header "Запуск сервисов n8n"
-    # Проверяем и создаем директорию если нужно
+    print_header "Запуск сервисов n8n, traefik и n8n-mcp"
     if [ ! -d "$PROJECT_DIR" ]; then
         print_error "Директория $PROJECT_DIR не найдена"
         exit 1
     fi
     cd "$PROJECT_DIR"
-    # Проверяем конфигурационные файлы
     if ! check_config_files; then
         exit 1
     fi
@@ -493,13 +465,12 @@ start_services() {
     docker compose up -d
     print_info "Ожидание запуска сервисов..."
     sleep 40
-    # Проверка статуса
     if docker compose ps | grep -q "Up"; then
         print_success "Сервисы успешно запущены!"
-        # Получение внешнего IP для информации
         EXTERNAL_IP=$(curl -s ifconfig.me 2>/dev/null || echo "не удалось определить")
         print_header "Информация о развертывании"
         echo -e "${GREEN}✓ n8n доступен по адресу: https://${SUBDOMAIN}.${MAIN_DOMAIN}${NC}"
+        echo -e "${GREEN}✓ Traefik dashboard: https://traefik.${MAIN_DOMAIN}${NC}"
         echo -e "${GREEN}✓ n8n-mcp доступен по порту: ${MCP_PORT}${NC}"
         echo -e "${BLUE}ℹ Внешний IP сервера: $EXTERNAL_IP${NC}"
         echo -e "${YELLOW}⚠ Убедитесь, что DNS записи указывают на этот IP${NC}"
@@ -515,7 +486,6 @@ start_services() {
 # Настройка автозапуска
 setup_autostart() {
     print_header "Настройка автозапуска"
-    # Создание systemd сервиса для автозапуска
     cat > /etc/systemd/system/n8n.service << EOF
 [Unit]
 Description=n8n Workflow Automation
@@ -541,7 +511,6 @@ EOF
 
 # Основная функция
 main() {
-    # Проверка прав root
     if [ "$EUID" -ne 0 ]; then
         print_error "Этот скрипт должен быть запущен с правами root (sudo)"
         exit 1
@@ -549,10 +518,8 @@ main() {
     print_header "Установка n8n на Ubuntu VPS"
     print_info "Скрипт поддерживает Ubuntu 20.04, 22.04, 24.04 LTS"
     echo
-    # Сохраняем исходную директорию
     ORIGINAL_DIR=$(pwd)
     PROJECT_FULL="$ORIGINAL_DIR/$PROJECT_DIR"
-    # Выполнение шагов
     check_ubuntu_version
     install_docker
     check_existing_containers
@@ -562,7 +529,7 @@ main() {
     start_services
     setup_autostart
     print_header "Установка завершена!"
-    print_success "n8n и n8n-mcp успешно развернуты на вашем сервере"
+    print_success "n8n, traefik и n8n-mcp успешно развернуты на вашем сервере"
     print_info "Не забудьте настроить DNS записи для домена"
     print_info "Используйте 'docker compose logs -f' в директории $PROJECT_DIR для просмотра логов"
 }
@@ -577,9 +544,9 @@ case "${1:-}" in
         echo "Опции:"
         echo "  --help, -h          Показать эту справку"
         echo "  --version, -v       Показать версию скрипта"
-        echo "  --update            Обновить n8n до последней версии"
-        echo "  --stop              Остановить все сервисы n8n"
-        echo "  --restart           Перезапустить сервисы n8n"
+        echo "  --update            Обновить n8n и n8n-mcp до последней версии"
+        echo "  --stop              Остановить все сервисы"
+        echo "  --restart           Перезапустить сервисы"
         echo "  --check             Проверить конфигурационные файлы"
         echo ""
         exit 0
@@ -590,72 +557,62 @@ case "${1:-}" in
         exit 0
         ;;
     --update)
-        print_header "Обновление n8n"
-        # Сохраняем текущую директорию
+        print_header "Обновление n8n и n8n-mcp"
         ORIGINAL_DIR=$(pwd)
         if [ -d "n8n-compose" ]; then
             cd n8n-compose
-            # Проверяем наличие docker-compose.yml
             if [ ! -f "docker-compose.yml" ]; then
                 print_error "Файл docker-compose.yml не найден в директории n8n-compose"
                 exit 1
             fi
             docker compose pull
             docker compose up -d
-            print_success "n8n обновлен"
+            print_success "n8n и n8n-mcp обновлены"
         else
             print_error "Директория n8n-compose не найдена"
             exit 1
         fi
-        # Возвращаемся в исходную директорию
         cd "$ORIGINAL_DIR" 2>/dev/null || true
         exit 0
         ;;
     --stop)
-        print_header "Остановка n8n"
-        # Сохраняем текущую директорию
+        print_header "Остановка сервисов"
         ORIGINAL_DIR=$(pwd)
         if [ -d "n8n-compose" ]; then
             cd n8n-compose
-            # Проверяем наличие docker-compose.yml
             if [ ! -f "docker-compose.yml" ]; then
                 print_error "Файл docker-compose.yml не найден в директории n8n-compose"
                 exit 1
             fi
             docker compose down
-            print_success "n8n остановлен"
+            print_success "Сервисы остановлены"
         else
             print_error "Директория n8n-compose не найдена"
             exit 1
         fi
-        # Возвращаемся в исходную директорию
         cd "$ORIGINAL_DIR" 2>/dev/null || true
         exit 0
         ;;
     --restart)
-        print_header "Перезапуск n8n"
-        # Сохраняем текущую директорию
+        print_header "Перезапуск сервисов"
         ORIGINAL_DIR=$(pwd)
         if [ -d "n8n-compose" ]; then
             cd n8n-compose
-            # Проверяем наличие docker-compose.yml
             if [ ! -f "docker-compose.yml" ]; then
                 print_error "Файл docker-compose.yml не найден в директории n8n-compose"
                 exit 1
             fi
             docker compose restart
-            print_success "n8n перезапущен"
+            print_success "Сервисы перезапущены"
         else
             print_error "Директория n8n-compose не найдена"
             exit 1
         fi
-        # Возвращаемся в исходную директорию
         cd "$ORIGINAL_DIR" 2>/dev/null || true
         exit 0
         ;;
     --check)
         print_header "Проверка конфигурации"
-        # Сохраняем текущую директорию
         ORIGINAL_DIR=$(pwd)
         if [ -d "n8n-compose" ]; then
             cd n8n-compose
@@ -669,7 +626,6 @@ case "${1:-}" in
             print_error "Директория n8n-compose не найдена"
             exit 1
         fi
-        # Возвращаемся в исходную директорию
         cd "$ORIGINAL_DIR" 2>/dev/null || true
         exit 0
         ;;
