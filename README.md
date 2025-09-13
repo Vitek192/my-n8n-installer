@@ -370,7 +370,7 @@ services:
       start_period: 30s
 
   n8n-mcp:
-    image: ghcr.io/${GITHUB_REPOSITORY}/n8n-mcp:${VERSION}
+    image: ghcr.io/${GITHUB_REPOSITORY}/n8n-mcp:latest
     container_name: n8n-mcp
     restart: unless-stopped
     ports:
